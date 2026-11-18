@@ -27,6 +27,8 @@ def render_map(graph: Graph) -> str:
         lines.append(f"Source: {source['provider']} {detail} ({source['environment']}{endpoint})")
     repos = graph.of_kind("repo")
     secrets = [s for s in graph.of_kind("secret") if s["scope"] != "unresolved"]
+    if graph.gaps:
+        lines.append("Collection incomplete. Counts below cover only the data Firebreak could read.")
     lines.append(f"Repositories: {len(repos)}   Workflows: {len(graph.of_kind('workflow'))}   "
                  f"Secrets: {len(secrets)}   Deploy keys: {len(graph.of_kind('deploy_key'))}")
     points = []
@@ -45,7 +47,12 @@ def render_map(graph: Graph) -> str:
             name = entry["principal"].get("name") or entry["principal"].get("key_id")
             lines.append(f"        AWS {name} via {entry['via']} ({entry['exposure']}): {entry['reach']}")
     if not shown:
-        lines.append("  none: no exposure point can read a stored credential")
+        if graph.gaps:
+            gap = graph.gaps[0]
+            lines.append(f"  Credential exposure is unknown. Could not read {gap['what']} for "
+                         f"{gap['scope']} ({gap['reason']}).")
+        else:
+            lines.append("  No credential exposure found in the collected data.")
     accounts = graph.of_kind("aws_account")
     for account in accounts:
         keys = [k for k in graph.of_kind("aws_access_key") if k["account"] == account["account"]]
@@ -87,9 +94,13 @@ def render_map(graph: Graph) -> str:
 
 
 def render_plan(plan: dict) -> str:
-    lines = [f"DRY RUN cut plan for {plan['point']}",
-             f"Credentials in scope: {plan['credentials']}   Referenced but not found: {plan['unconfirmed']}   "
-             f"AWS principals reachable: {plan.get('aws_principals', 0)}"]
+    lines = [f"DRY RUN cut plan for {plan['point']}"]
+    empty_stage = "  nothing to do"
+    if plan["gaps"]:
+        lines.append("This plan is incomplete because some data could not be read.")
+        empty_stage = "  No steps identified from the collected data."
+    lines.append(f"Credentials in scope: {plan['credentials']}   Referenced but not found: {plan['unconfirmed']}   "
+                 f"AWS principals reachable: {plan.get('aws_principals', 0)}")
     number = 0
     for stage in plan["stages"]:
         lines.append(f"\n{stage['name']}")
@@ -97,7 +108,7 @@ def render_plan(plan: dict) -> str:
             number += 1
             lines.append(f"  {number:>2}. {'[person]' if step['human'] else '[command]'} {step['action']}")
         if not stage["steps"]:
-            lines.append("  nothing to do")
+            lines.append(empty_stage)
     for gap in plan["gaps"]:
         lines.append(f"\nNot collected for this repository: {gap['what']} ({gap['reason']})")
     if plan.get("commands"):

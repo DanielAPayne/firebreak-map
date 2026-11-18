@@ -148,7 +148,36 @@ class MapPlanTests(unittest.TestCase):
     def test_denied_endpoint_becomes_a_gap(self):
         graph = github.collect(FakeClient(deny=("/repos/acme/app/actions/secrets",)), "acme")
         self.assertIn({"scope": "acme/app", "what": "repository secrets", "reason": "HTTP 403"}, graph.gaps)
-        self.assertIn("repository secrets (HTTP 403)", cli.render_map(graph))
+        report = cli.render_map(graph)
+        self.assertIn("repository secrets (HTTP 403)", report)
+        self.assertLess(report.index("Collection incomplete"), report.index("Repositories:"))
+        self.assertRegex(report, r"repo\s+acme/lib")
+        self.assertNotIn("Credential exposure is unknown", report)
+
+    def test_denied_secret_list_reports_unknown_exposure(self):
+        graph = github.collect(FakeClient(deny=("/repos/acme/lib/actions/secrets",)), "acme", only_repo="lib")
+        report = cli.render_map(graph)
+        self.assertIn("Credential exposure is unknown", report)
+        self.assertIn("Could not read repository secrets for acme/lib (HTTP 403)", report)
+        self.assertNotIn("no exposure point can read", report)
+
+    def test_readable_empty_secret_list_reports_no_observed_exposure(self):
+        client = FakeClient()
+        client.data["/repos/acme/lib/actions/secrets"] = []
+        graph = github.collect(client, "acme", only_repo="lib")
+        report = cli.render_map(graph)
+        self.assertIn("No credential exposure found in the collected data", report)
+        self.assertNotIn("Collection incomplete", report)
+        self.assertNotIn("Credential exposure is unknown", report)
+
+    def test_plan_with_a_denied_secret_list_marks_empty_stages_incomplete(self):
+        graph = github.collect(FakeClient(deny=("/repos/acme/lib/actions/secrets",)), "acme", only_repo="lib")
+        plan = analyze.cut_plan(graph, analyze.resolve_point(graph, "acme/lib"))
+        report = cli.render_plan(plan)
+        self.assertLess(report.index("This plan is incomplete"), report.index("Credentials in scope:"))
+        self.assertIn("No steps identified from the collected data", report)
+        self.assertIn("repository secrets (HTTP 403)", report)
+        self.assertNotIn("nothing to do", report)
 
     def test_graph_round_trip_and_render(self):
         again = Graph.from_json(self.graph.to_json())
