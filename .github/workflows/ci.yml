@@ -21,4 +21,5 @@ jobs:
       - run: pip install -r requirements-test.txt
       - name: All tests, AWS against Moto
         run: python -m unittest discover -s tests -v
-      - run: python -m firebreak verify
+      - name: The public build has map and plan, and nothing else
+        run: python -m firebreak --help | grep -q '{map,plan}'
