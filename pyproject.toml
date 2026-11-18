@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "firebreak-map"
+version = "0.1.0"
+description = "Map what each GitHub repository and workflow can reach, across GitHub and AWS, and plan how to cut it. Read-only."
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+aws = ["boto3>=1.34"]
+test = ["boto3>=1.34", "moto[iam,sts]>=5.0"]
+
+[project.scripts]
+firebreak = "firebreak.cli:main"
+
+[tool.setuptools]
+packages = ["firebreak"]
