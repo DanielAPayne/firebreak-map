@@ -11,6 +11,10 @@ import urllib.request
 
 from .graph import Graph
 
+
+class NotFound(Exception):
+    """Something the user named does not exist or is not visible to the token."""
+
 API = "https://api.github.com"
 
 # (provider, name pattern). First match wins. A guess from the secret's name only.
@@ -159,10 +163,16 @@ def collect(client, owner: str, only_repo: str | None = None) -> Graph:
         repos = client.get_all(f"/users/{owner}/repos?type=owner")
         graph.add_gap(owner, "private repositories", "token belongs to another user")
 
+    if only_repo:
+        match = [r for r in repos if r["name"].lower() == only_repo.lower()]
+        if not match:
+            raise NotFound(f"Repository {owner}/{only_repo} was not found, or this token cannot see it.")
+        if match[0].get("archived") or match[0].get("disabled"):
+            raise NotFound(f"Repository {owner}/{match[0]['name']} is archived or disabled, so its workflows cannot run; "
+                           "nothing to map.")
+        repos = match
     for repo in repos:
         name = repo["name"]
-        if only_repo and name != only_repo:
-            continue
         if repo.get("archived") or repo.get("disabled"):
             continue
         full = f"{owner}/{name}"

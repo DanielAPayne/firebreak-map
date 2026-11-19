@@ -55,6 +55,29 @@ class PureTests(unittest.TestCase):
         self.assertFalse(s["admin"])
         self.assertIn("conditional", s["reach"])
 
+    def test_deny_statements(self):
+        def reach(*statements):
+            return aws.summarize([("p", {"Statement": list(statements)})])
+        allow_all = {"Effect": "Allow", "Action": "*", "Resource": "*"}
+        no_iam = reach(allow_all, {"Effect": "Deny", "Action": "iam:*", "Resource": "*"})
+        self.assertEqual((no_iam["admin"], no_iam["reach"]), (False, "all actions except iam:*"))
+        self.assertEqual(reach(allow_all, {"Effect": "Deny", "Action": "*", "Resource": "*"})["reach"],
+                         "none: every action is denied")
+        mixed = reach({"Effect": "Allow", "Action": ["iam:*", "s3:GetObject"], "Resource": "*"},
+                      {"Effect": "Deny", "Action": "iam:*", "Resource": "*"})
+        self.assertEqual(mixed["reach"], "s3 (read)")
+        # A conditional Deny can't be applied without the request context: reach stays an upper bound.
+        conditional = reach(allow_all, {"Effect": "Deny", "Action": "iam:*", "Resource": "*",
+                                        "Condition": {"Bool": {"aws:MultiFactorAuthPresent": "false"}}})
+        self.assertTrue(conditional["admin"])
+
+    def test_role_any_principal_can_assume_says_so(self):
+        graph = Graph()
+        graph.add_node("aws-account:1", "aws_account", account="1", environment="synthetic")
+        graph.add_node("aws-role:r", "aws_role", name="open", account="1", reach="none", anyone=True,
+                       github=False, github_subjects=[], external_accounts=[], services=[])
+        self.assertIn("role open: none; assumable by ANY AWS principal", cli.render_map(graph))
+
     def test_allows(self):
         s = aws.summarize([("p", {"Statement": [{"Effect": "Allow", "Action": "sts:Assume*",
                                                   "Resource": "arn:aws:iam::1:role/deploy-*"}]})])["allow"]
@@ -243,6 +266,12 @@ class MotoTests(unittest.TestCase):
         self.assertIn(f"Source: aws {ACCOUNT} (simulated)", text)
         self.assertIn("ANY GitHub repository", text)
         self.assertIn("AWS admin-role via secret AWS_ACCESS_KEY_ID, then sts:AssumeRole (direct)", text)
+
+    def test_bad_profile_is_a_message(self):
+        import contextlib, io
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+            cli.main(["map", "--aws", "--aws-profile", "no-such-profile"])
+        self.assertIn("AWS: The config profile (no-such-profile) could not be found", str(caught.exception.code))
 
     def test_environment_for(self):
         self.assertEqual(aws.environment_for(None), ("observed", None))

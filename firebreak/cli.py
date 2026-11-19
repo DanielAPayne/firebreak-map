@@ -15,8 +15,56 @@ cut_commands = (importlib.import_module(f"{__package__}.cut_commands")
                 if importlib.util.find_spec(f"{__package__}.cut_commands") else None)
 
 
+def _read_json(path: str, what: str):
+    try:
+        return json.loads(Path(path).read_text())
+    except FileNotFoundError:
+        raise SystemExit(f"firebreak: {what} not found: {path}") from None
+    except (json.JSONDecodeError, UnicodeDecodeError) as err:
+        raise SystemExit(f"firebreak: {what} {path} is not valid JSON ({err})") from None
+
+
 def _load(path: str) -> Graph:
-    return Graph.from_json(Path(path).read_text())
+    data = _read_json(path, "map file")
+    if not isinstance(data, dict) or not {"nodes", "edges"} <= data.keys():
+        raise SystemExit(f"firebreak: {path} is not a Firebreak map (expected the file written by `map --out`)")
+    return Graph.from_json(json.dumps(data))
+
+
+def _github_message(err) -> str:
+    if err.status == 401:
+        return ("GitHub rejected the token (HTTP 401): it is missing, expired or revoked. "
+                "Set FIREBREAK_GITHUB_TOKEN, or sign in again with `gh auth login`.")
+    if err.status == 404 and err.path.startswith("/users/"):
+        return f"GitHub account or organization {err.path.split('/')[2]!r} was not found."
+    if err.status == 403:
+        return f"GitHub refused {err.path} (HTTP 403): the token may lack access, or the rate limit was reached."
+    return f"GitHub returned HTTP {err.status} for {err.path}."
+
+
+def _aws_message(err) -> str:
+    kind = type(err).__name__
+    if kind == "ProfileNotFound":
+        return f"{str(err).rstrip('.')}. Check the name, or your ~/.aws/config and ~/.aws/credentials."
+    if kind in ("EndpointConnectionError", "ConnectTimeoutError", "ReadTimeoutError"):
+        return f"{str(err).rstrip('.')}. Check --aws-endpoint and your network."
+    code = getattr(err, "response", {}).get("Error", {}).get("Code", "")
+    if code in ("InvalidClientTokenId", "SignatureDoesNotMatch", "ExpiredToken", "UnrecognizedClientException"):
+        return f"AWS rejected the credentials ({code}). Check the profile's keys, or refresh its session."
+    return str(err)
+
+
+def main(argv=None) -> int:
+    try:
+        return _run(argv)
+    except github.ApiError as err:
+        raise SystemExit(f"firebreak: {_github_message(err)}") from None
+    except github.NotFound as err:
+        raise SystemExit(f"firebreak: {err}") from None
+    except Exception as err:
+        if type(err).__module__.startswith("botocore"):
+            raise SystemExit(f"firebreak: AWS: {_aws_message(err)}") from None
+        raise
 
 
 def render_map(graph: Graph) -> str:
@@ -76,6 +124,8 @@ def render_map(graph: Graph) -> str:
                 trusted.append("this account")
             trusted += [f"account {a}" for a in role.get("external_accounts", [])]
             trusted += role.get("services", [])
+            if role.get("anyone"):
+                trusted.insert(0, "ANY AWS principal (check its conditions)")
             lines.append(f"  role {role['name']}: {role['reach']}; assumable by {', '.join(trusted) or 'nobody listed'}")
     found = analyze.findings(graph)
     lines.append(f"\nReduction candidates: {len(found)}")
@@ -119,7 +169,7 @@ def render_plan(plan: dict) -> str:
     return "\n".join(lines)
 
 
-def main(argv=None) -> int:
+def _run(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="firebreak", description="Credential containment for the delivery pipeline. "
                                      + ("Read-only unless `cut --execute` is given." if cut_commands else "Read-only."))
     sub = parser.add_subparsers(dest="command", required=True)
@@ -153,7 +203,11 @@ def main(argv=None) -> int:
             aws.collect(aws.make_session(args.aws_profile), graph, environment, endpoint)
         aws.link_github(graph)
         if args.aws_links:
-            aws.link_secrets(graph, json.loads(Path(args.aws_links).read_text()))
+            links = _read_json(args.aws_links, "links file")
+            if not isinstance(links, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in links.items()):
+                raise SystemExit(f"firebreak: links file {args.aws_links} must be a JSON object of "
+                                 '"owner/repo:SECRET_NAME": "access key id" pairs')
+            aws.link_secrets(graph, links)
         if args.out:
             Path(args.out).write_text(graph.to_json())
         print(render_map(graph))

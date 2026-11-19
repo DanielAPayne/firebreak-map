@@ -25,7 +25,7 @@ GITHUB_OIDC = "token.actions.githubusercontent.com"
 CUT_INSTALLED = importlib.util.find_spec(f"{__package__}.cut") is not None
 VERIFY_HINT = " Feed the observations to `firebreak verify` with environment observed." if CUT_INSTALLED else ""
 OLD_DAYS = 90
-LIMITS = ["AWS reach reads identity-policy Allow statements only: Deny statements, permission boundaries, "
+LIMITS = ["AWS reach applies unconditional Deny statements on all resources; other Deny statements, permission boundaries, "
           "SCPs, session policies and resource policies are not evaluated, so reach is an upper bound.",
           "Role chaining (a role assuming another role) is not followed."]
 
@@ -78,11 +78,15 @@ def _is_read(action: str) -> bool:
 
 def summarize(documents: list[tuple[str, dict]]) -> dict:
     """Allow statements of a principal's policies, and a one-line reach."""
-    allow, denies = [], 0
+    allow, denies, denied = [], 0, []
     for name, doc in documents:
         for st in _as_list(doc.get("Statement")):
             if st.get("Effect") != "Allow":
                 denies += 1
+                # An unconditional Deny of named actions on every resource can be applied exactly.
+                if (st.get("Effect") == "Deny" and not st.get("Condition") and "Action" in st
+                        and "*" in _as_list(st.get("Resource"))):
+                    denied += [a.lower() for a in _as_list(st["Action"])]
                 continue
             not_action, not_resource = "NotAction" in st, "NotResource" in st
             allow.append({"policy": name,
@@ -90,8 +94,11 @@ def summarize(documents: list[tuple[str, dict]]) -> dict:
                           "resources": _as_list(st.get("NotResource" if not_resource else "Resource")),
                           "not_action": not_action, "not_resource": not_resource,
                           "conditional": bool(st.get("Condition"))})
-    admin = any(not s["conditional"] and not s["not_action"] and not s["not_resource"]
-                and "*" in s["resources"] and any(a in ("*", "*:*") for a in s["actions"]) for s in allow)
+    full_allow = any(not s["conditional"] and not s["not_action"] and not s["not_resource"]
+                     and "*" in s["resources"] and any(a in ("*", "*:*") for a in s["actions"]) for s in allow)
+    everything_denied = any(a in ("*", "*:*") for a in denied)
+    denied_services = {a.split(":")[0] for a in denied if a.endswith(":*")}
+    admin = full_allow and not denied
     services, writes = set(), set()
     for s in allow:
         if s["not_action"]:
@@ -102,14 +109,20 @@ def summarize(documents: list[tuple[str, dict]]) -> dict:
             services.add(service)
             if not _is_read(a):
                 writes.add(service)
+    services -= denied_services
     labels = sorted(f"{s} (read)" if s not in writes and not s.startswith("all") else s for s in services)
-    if admin:
+    if everything_denied:
+        reach = "none: every action is denied"
+    elif admin:
         reach = "admin: every action on every resource"
-    elif not allow:
+    elif full_allow:
+        reach = "all actions except " + ", ".join(sorted(set(denied)))
+    elif not allow or not labels:
         reach = "none"
     else:
         reach = ", ".join(labels) + ("; some conditional" if any(s["conditional"] for s in allow) else "")
-    return {"allow": allow, "deny_statements": denies, "admin": admin, "reach": reach}
+    return {"allow": allow, "deny_statements": denies, "denied_actions": sorted(set(denied)), "admin": admin,
+            "reach": reach}
 
 
 def allows(statements: list[dict], action: str, resource: str) -> dict | None:
