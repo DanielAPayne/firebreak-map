@@ -40,7 +40,7 @@ A profile with only `IAMReadOnlyAccess` is enough. The map then shows which AWS 
 
 ## Limits
 
-- AWS reach reads identity-policy Allow statements only: Deny statements, permission boundaries, SCPs, session policies and resource policies are not evaluated, so reach is an upper bound. Role chaining is not followed.
+- AWS reach reads identity-policy Allow statements and applies unconditional Deny statements on all resources; other Deny statements, permission boundaries, SCPs, session policies and resource policies are not evaluated, so reach is an upper bound. Role chaining is not followed.
 - Provider types are guessed from secret names. Workflow files are scanned as text, per file, not per job.
 - It plans; it does not cut.
 

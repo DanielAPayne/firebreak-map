@@ -1,5 +1,6 @@
 """Collector, blast radius, findings and cut plan against a canned GitHub."""
 from datetime import datetime, timezone
+from pathlib import Path
 import unittest
 
 from firebreak import analyze, cli, github
@@ -190,6 +191,40 @@ class MapPlanTests(unittest.TestCase):
         text = cli.render_plan(analyze.cut_plan(self.graph, analyze.resolve_point(self.graph, "acme/app")))
         if not CUT_INSTALLED:
             self.assertNotRegex(text, r"firebreak (cut|verify|evidence)")
+
+    def test_mistyped_or_archived_repo_is_an_error(self):
+        with self.assertRaisesRegex(github.NotFound, "acme/nope-nope was not found"):
+            github.collect(FakeClient(), "acme", "nope-nope")
+        with self.assertRaisesRegex(github.NotFound, "archived"):
+            github.collect(FakeClient(), "acme", "old")
+        graph = github.collect(FakeClient(), "acme", "APP")  # GitHub names are case-insensitive
+        self.assertEqual([n["name"] for n in graph.of_kind("repo")], ["acme/app"])
+
+    def _cli_error(self, argv, collect_error=None):
+        import contextlib, io
+        from unittest import mock
+        patch = mock.patch.object(github, "collect", side_effect=collect_error) if collect_error else contextlib.nullcontext()
+        with patch, mock.patch.object(github, "token_from_environment", return_value="t"), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                cli.main(argv)
+        return str(caught.exception.code)
+
+    def test_user_errors_are_one_line_messages(self):
+        import tempfile
+        self.assertIn("rejected the token (HTTP 401)",
+                      self._cli_error(["map", "--owner", "x"], github.ApiError(401, "/users/x")))
+        self.assertIn("'ghost' was not found",
+                      self._cli_error(["map", "--owner", "ghost"], github.ApiError(404, "/users/ghost")))
+        self.assertIn("map file not found", self._cli_error(["plan", "--graph", "/no/such.json", "--point", "a/b"]))
+        with tempfile.TemporaryDirectory() as d:
+            bad, other, links = (Path(d) / n for n in ("bad.json", "other.json", "links.json"))
+            bad.write_text("{bad"); other.write_text("[1, 2]"); links.write_text('["not", "a", "map"]')
+            self.assertIn("is not valid JSON", self._cli_error(["map", "--graph", str(bad)]))
+            self.assertIn("is not a Firebreak map", self._cli_error(["map", "--graph", str(other)]))
+            good = Path(d) / "graph.json"
+            good.write_text(self.graph.to_json())
+            self.assertIn("must be a JSON object", self._cli_error(["map", "--graph", str(good), "--aws-links", str(links)]))
 
     def test_github_client_cannot_write(self):
         # map and plan only read: the client has no method that sends anything but a GET.
